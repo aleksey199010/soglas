@@ -1,0 +1,399 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Согласование этикеток — WebApp</title>
+
+<!-- Telegram WebApp JS -->
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+
+<style>
+  body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;max-width:900px;margin:16px auto;padding:12px}
+  header{display:flex;justify-content:space-between;align-items:center}
+  .card{border:1px solid #ddd;padding:12px;border-radius:8px;margin:10px 0}
+  .file-item{display:flex;justify-content:space-between;align-items:flex-start;gap:12px}
+  img.preview{max-width:220px;max-height:120px;border:1px solid #ccc}
+  .btn{padding:6px 10px;border-radius:6px;border:1px solid #888;background:#f6f6f6;cursor:pointer}
+  .btn.primary{background:#2563eb;color:#fff;border-color:#2563eb}
+  .small{font-size:13px}
+  textarea{width:100%;min-height:60px}
+  input[type=file]{padding:6px}
+  .hidden{display:none}
+  .muted{color:#666;font-size:13px}
+</style>
+</head>
+
+<body>
+<header>
+  <h2>Согласование этикеток — WebApp (без серверов)</h2>
+  <div id="tg-info" class="muted small">Telegram: проверка...</div>
+</header>
+
+<div class="card">
+  <strong>Режим:</strong> <span id="mode">Гость</span>
+  <div style="margin-top:8px">
+    <button id="btn-login" class="btn">Войти админом</button>
+    <button id="btn-logout" class="btn hidden">Выйти</button>
+    <span class="muted small">Логин: <code>Aleksey</code>, пароль: <code>2664888</code></span>
+  </div>
+</div>
+
+<div class="card">
+  <strong>Админ: загрузка этикетки с ПК</strong>
+  <div class="muted small">JPG, PNG, PDF</div>
+  <input id="file-input" type="file" accept="image/*,application/pdf" />
+  <div style="margin-top:8px">
+    Название: <input id="file-name" placeholder="Название файла" />
+    <br><br>
+    Ссылка: <input id="file-url" placeholder="https://..." style="width:100%" />
+    <button id="btn-add-link" class="btn">Добавить по ссылке</button>
+  </div>
+
+  <hr>
+
+  <button id="btn-export-package" class="btn">Экспорт пакета (.labels.json)</button>
+  <button id="btn-import-package" class="btn">Импорт пакета</button>
+  <input id="import-package-file" type="file" accept=".json" class="hidden" />
+</div>
+
+<div class="card">
+  <strong>Список файлов</strong>
+  <div id="files-list"></div>
+</div>
+
+<div class="card">
+  <strong>Просмотр файла</strong>
+  <div id="viewer" class="hidden">
+    <div id="viewer-title" style="font-weight:bold;margin-bottom:6px"></div>
+    <div id="viewer-content"></div>
+
+    <div style="margin-top:10px">
+      <button id="btn-download" class="btn">Скачать</button>
+      <button id="btn-open-new" class="btn">Открыть в новой вкладке</button>
+    </div>
+    <hr>
+
+    <strong>Ваш ответ</strong><br>
+    Имя: <span id="current-user">Участник</span>
+    <button id="btn-change-name" class="btn small">Изменить</button>
+
+    <div style="margin-top:10px">
+      <button id="btn-approve" class="btn primary">Согласовано</button>
+      <button id="btn-reject" class="btn">Не согласовано</button>
+    </div>
+
+    <textarea id="reason" placeholder="Если не согласовано — причина"></textarea>
+  </div>
+</div>
+
+<div class="card">
+  <strong>Экспорт ответов</strong>
+  <div style="margin-top:6px">
+    <button id="btn-export-responses" class="btn">Экспорт моих ответов (CSV)</button>
+    <button id="btn-export-all-responses" class="btn hidden">Экспорт всех (для админа)</button>
+  </div>
+</div>
+
+<!-- --------------- JS ЛОГИКА ---------------- -->
+<script>
+const ADMIN_LOGIN = "Aleksey";
+const ADMIN_PASS = "2664888";
+
+let state = {
+  files: [],
+  responses: {},
+  currentUser: "Участник",
+  isAdmin: false
+};
+
+function uid(){ return Date.now().toString(36)+Math.random().toString(36).slice(2); }
+
+function save(){
+  localStorage.setItem("files",JSON.stringify(state.files));
+  localStorage.setItem("responses",JSON.stringify(state.responses));
+  localStorage.setItem("user",state.currentUser);
+  localStorage.setItem("isAdmin",state.isAdmin?"1":"0");
+}
+
+function load(){
+  try{
+    state.files = JSON.parse(localStorage.getItem("files")||"[]");
+    state.responses = JSON.parse(localStorage.getItem("responses")||"{}");
+    state.currentUser = localStorage.getItem("user")||"Участник";
+    state.isAdmin = localStorage.getItem("isAdmin")==="1";
+  }catch(e){}
+}
+
+function escapeHtml(t){return t.replace(/[&<>]/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[m]));}
+
+function render(){
+  document.getElementById("mode").textContent = state.isAdmin?"Админ":"Гость";
+  document.getElementById("current-user").textContent = state.currentUser;
+  document.getElementById("btn-logout").classList.toggle("hidden",!state.isAdmin);
+  document.getElementById("btn-export-all-responses").classList.toggle("hidden",!state.isAdmin);
+
+  const list = document.getElementById("files-list");
+  list.innerHTML="";
+
+  if(state.files.length===0){
+    list.innerHTML='<div class="muted">Файлов нет. Админ должен загрузить.</div>';
+    return;
+  }
+
+  state.files.forEach(f=>{
+    let el=document.createElement("div");
+    el.className="card";
+    el.innerHTML=`
+      <div class="file-item">
+        <div style="flex:1">
+          <b>${escapeHtml(f.name)}</b><br>
+          <span class="muted small">${escapeHtml((f.url||"").slice(0,120))}</span>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:6px">
+          <button class="btn" onclick="openViewer('${f.id}')">Открыть</button>
+          <button class="btn" onclick="downloadById('${f.id}')">Скачать</button>
+        </div>
+      </div>`;
+    list.appendChild(el);
+  });
+}
+
+function loginAdmin(){
+  let l=prompt("Логин");
+  let p=prompt("Пароль");
+  if(l===ADMIN_LOGIN && p===ADMIN_PASS){
+    state.isAdmin=true; save(); render(); alert("Админ вход выполнен");
+  }else alert("Неверные данные");
+}
+
+document.getElementById("btn-login").onclick=()=>loginAdmin();
+document.getElementById("btn-logout").onclick=()=>{
+  state.isAdmin=false; save(); render();
+};
+
+document.getElementById("file-input").onchange=e=>{
+  let f=e.target.files[0];
+  if(!f)return;
+
+  let reader=new FileReader();
+  reader.onload=()=>{
+    let file={
+      id:uid(),
+      name:f.name,
+      url:reader.result,
+      type:f.type.startsWith("image")?"image":"pdf"
+    };
+    state.files.unshift(file); save(); render();
+  };
+  reader.readAsDataURL(f);
+};
+
+document.getElementById("btn-add-link").onclick=()=>{
+  if(!state.isAdmin) return alert("Только админ");
+  let name=document.getElementById("file-name").value.trim();
+  let url=document.getElementById("file-url").value.trim();
+  if(!name||!url) return alert("Укажите имя и ссылку");
+  let type=url.endsWith(".pdf")?"pdf":url.match(/\.(jpg|jpeg|png)$/i)?"image":"link";
+  state.files.unshift({id:uid(),name,url,type});
+  save(); render();
+};
+
+document.getElementById("btn-export-package").onclick=()=>{
+  let blob=new Blob([JSON.stringify({files:state.files},null,2)],{type:"application/json"});
+  let a=document.createElement("a");
+  a.href=URL.createObjectURL(blob);
+  a.download="package.labels.json";
+  a.click();
+  URL.revokeObjectURL(a.href);
+};
+
+document.getElementById("btn-import-package").onclick=()=>{
+  document.getElementById("import-package-file").click();
+};
+document.getElementById("import-package-file").onchange=e=>{
+  let f=e.target.files[0];
+  let r=new FileReader();
+  r.onload=()=>{
+    try{
+      let pkg=JSON.parse(r.result);
+      if(pkg.files) state.files=pkg.files;
+      save(); render(); alert("Пакет импортирован");
+    }catch(err){ alert("Ошибка пакета"); }
+  };
+  r.readAsText(f);
+  e.target.value="";
+};
+
+window.currentFileId=null;
+
+function openViewer(id){
+  window.currentFileId=id;
+  const f=state.files.find(x=>x.id===id);
+  document.getElementById("viewer").classList.remove("hidden");
+  document.getElementById("viewer-title").textContent=f.name;
+
+  let v=document.getElementById("viewer-content");
+  v.innerHTML="";
+
+  if(f.type==="image"){
+    v.innerHTML=`<img src="${f.url}" class="preview">`;
+  }else if(f.type==="pdf"){
+    v.innerHTML=`<iframe src="${f.url}" style="width:100%;height:500px;border:1px solid #ccc"></iframe>`;
+  } else {
+    v.innerHTML=`<a href="${f.url}" target="_blank">Открыть файл</a>`;
+  }
+
+  // render responses for this file
+  renderResponses(id);
+}
+
+async function downloadById(id){
+  const f = state.files.find(x=>x.id===id);
+  if(!f) return;
+  if(f.url && f.url.startsWith("data:")){
+    try{
+      const res = await fetch(f.url);
+      const blob = await res.blob();
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = f.name || 'file';
+      a.click();
+      URL.revokeObjectURL(a.href);
+      return;
+    }catch(e){
+      console.warn(e);
+    }
+  }
+  // fallback to opening
+  window.open(f.url, "_blank");
+}
+
+document.getElementById("btn-download").onclick=()=>{
+  if(window.currentFileId) downloadById(window.currentFileId);
+};
+
+document.getElementById("btn-open-new").onclick=()=>{
+  const f=state.files.find(x=>x.id===window.currentFileId);
+  if(f && f.url) window.open(f.url,"_blank");
+};
+
+document.getElementById("btn-change-name").onclick=()=>{
+  let n=prompt("Имя:",state.currentUser);
+  if(n){ state.currentUser=n; save(); render(); }
+};
+
+document.getElementById("btn-approve").onclick=()=>submit(true);
+document.getElementById("btn-reject").onclick=()=>submit(false);
+
+function submit(ok){
+  const fid=window.currentFileId;
+  if(!fid) return alert("Откройте файл");
+
+  if(!ok){
+    let reason=document.getElementById("reason").value.trim();
+    if(!reason) return alert("Укажите причину");
+  }
+
+  let entry={
+    id:uid(),
+    user:state.currentUser,
+    approved:ok,
+    reason:document.getElementById("reason").value.trim(),
+    time:new Date().toISOString()
+  };
+
+  const arr=state.responses[fid]||[];
+  let filtered=arr.filter(x=>x.user!==state.currentUser);
+  filtered.push(entry);
+
+  state.responses[fid]=filtered;
+  save();
+
+  alert("Ответ сохранён");
+  renderResponses(fid);
+}
+
+function renderResponses(fileId){
+  const f=state.files.find(x=>x.id===fileId);
+  const arr = state.responses[fileId] || [];
+  let html = '<div><strong>Ответы:</strong></div>';
+  arr.forEach(r=>{
+    html += '<div style="padding:6px;border:1px solid #eee;margin-top:6px"><div style="display:flex;justify-content:space-between"><div><strong>'+escapeHtml(r.user)+'</strong> — '+new Date(r.time).toLocaleString()+'</div><div>'+(r.approved?'<span style="color:green">Согласовано</span>':'<span style="color:red">Не согласовано</span>')+'</div></div>';
+    if(r.reason) html += '<div class="muted small">Причина: '+escapeHtml(r.reason)+'</div>';
+    if(state.isAdmin) html += '<div style="margin-top:6px"><button class="btn" onclick="adminEditName(\''+fileId+'\',\''+r.id+'\')">Изменить имя</button></div>';
+    html += '</div>';
+  });
+  const viewerContent = document.getElementById('viewer-content');
+  // remove old responses block if exists
+  const old = viewerContent.querySelector('#responses-block');
+  if(old) old.remove();
+  const wrapper = document.createElement('div');
+  wrapper.id = 'responses-block';
+  wrapper.innerHTML = html;
+  viewerContent.appendChild(wrapper);
+}
+
+window.adminEditName = function(fileId, entryId){
+  if(!state.isAdmin) return alert('Только админ');
+  const newName = prompt('Новое имя согласующего');
+  if(!newName) return;
+  const arr = state.responses[fileId] || [];
+  const updated = arr.map(r=> r.id===entryId ? {...r, user:newName} : r);
+  state.responses[fileId] = updated; save(); alert('Имя изменено'); renderResponses(fileId);
+};
+
+document.getElementById("btn-export-responses").onclick=()=>{
+  let rows=[["fileId","fileName","user","approved","reason","time"]];
+  for(let fid in state.responses){
+    const f=state.files.find(x=>x.id===fid);
+    state.responses[fid].forEach(r=>{
+      if(r.user===state.currentUser){
+        rows.push([fid,f?f.name:"",r.user,r.approved?"1":"0",r.reason.replace(/\n/g,' '),r.time]);
+      }
+    });
+  }
+  let csv=rows.map(r=>r.map(c=>`"${String(c).replace(/"/g,'""')}"`).join(",")).join("\n");
+  let blob=new Blob([csv],{type:"text/csv"});
+  let a=document.createElement("a");
+  a.href=URL.createObjectURL(blob);
+  a.download="responses.csv";
+  a.click();
+  URL.revokeObjectURL(a.href);
+};
+
+document.getElementById("btn-export-all-responses").onclick=()=>{
+  if(!state.isAdmin) return alert("Только админ");
+  let blob=new Blob([JSON.stringify(state.responses,null,2)],{type:"application/json"});
+  let a=document.createElement("a");
+  a.href=URL.createObjectURL(blob);
+  a.download="all_responses.json";
+  a.click();
+  URL.revokeObjectURL(a.href);
+};
+
+function initTelegram(){
+  if(window.Telegram && window.Telegram.WebApp){
+    const tg=window.Telegram.WebApp;
+    tg.ready();
+    let u=tg.initDataUnsafe?.user;
+    if(u){
+      let name=u.username || (u.first_name+" "+(u.last_name||"")).trim();
+      if(name){ state.currentUser=name; save(); }
+      document.getElementById("tg-info").textContent="Telegram: "+name;
+    }else{
+      document.getElementById("tg-info").textContent="Telegram: нет данных о пользователе";
+    }
+  }else{
+    document.getElementById("tg-info").textContent="Открыто вне Telegram";
+  }
+}
+
+load();
+initTelegram();
+render();
+
+</script>
+
+</body>
+</html>
